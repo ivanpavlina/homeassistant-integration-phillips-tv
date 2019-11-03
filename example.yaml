@@ -1,5 +1,5 @@
 media_player:
-  - platform: philips_android_tv
+  - platform: phillips_android_tv
     name: TV
     host: 192.168.1.111
     mac: aa:aa:aa:aa:aa:aa

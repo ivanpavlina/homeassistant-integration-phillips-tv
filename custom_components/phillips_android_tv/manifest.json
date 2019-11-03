@@ -1,6 +1,6 @@
 {
-  "domain": "philips_android_tv",
-  "name": "Philips Android TV",
+  "domain": "phillips_android_tv",
+  "name": "Phillips Android TV",
   "documentation": "https://github.com/nstrelow/ha_philips_2016",
   "dependencies": [],
   "codeowners": [],

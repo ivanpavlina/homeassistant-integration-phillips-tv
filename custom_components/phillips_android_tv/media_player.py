@@ -1,9 +1,10 @@
-"""Philips TV"""
+"""Phillips TV"""
 import homeassistant.helpers.config_validation as cv
 import json
 import logging
 import time
 import voluptuous as vol
+import wakeonlan
 
 from datetime import timedelta
 from homeassistant.components.media_player import (
@@ -13,7 +14,7 @@ from homeassistant.components.media_player.const import (
     SUPPORT_STOP, SUPPORT_PLAY, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE,
     SUPPORT_PREVIOUS_TRACK, SUPPORT_VOLUME_SET, SUPPORT_TURN_OFF,
     SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_STEP,
-    SUPPORT_SELECT_SOURCE
+    SUPPORT_SELECT_SOURCE, SUPPORT_PLAY_MEDIA
 )
 from homeassistant.const import (
     CONF_HOST, CONF_MAC, CONF_NAME, CONF_USERNAME, CONF_PASSWORD, STATE_OFF,
@@ -32,6 +33,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _LOGGER = logging.getLogger(__name__)
 
 CONF_FAV_ONLY = 'favorite_channels_only'
+CONF_TURN_ON_SWITCH = 'turn_on_switch'
+CONF_TURN_OFF_SWITCH = 'turn_off_switch'
+CONF_CAST_ENTITY = 'cast_entity'
 
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=5)
 
@@ -39,14 +43,15 @@ SUPPORT_PHILIPS_2016 = SUPPORT_TURN_OFF | SUPPORT_TURN_ON | \
                        SUPPORT_VOLUME_STEP | SUPPORT_VOLUME_MUTE | \
                        SUPPORT_VOLUME_SET | SUPPORT_NEXT_TRACK | \
                        SUPPORT_PREVIOUS_TRACK | SUPPORT_PAUSE | \
-                       SUPPORT_PLAY | SUPPORT_STOP | SUPPORT_SELECT_SOURCE
+                       SUPPORT_PLAY | SUPPORT_STOP | SUPPORT_SELECT_SOURCE | \
+                       SUPPORT_PLAY_MEDIA
 
 DEFAULT_DEVICE = 'default'
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_MAC = 'aa:aa:aa:aa:aa:aa'
 DEFAULT_USER = 'user'
 DEFAULT_PASS = 'pass'
-DEFAULT_NAME = 'Philips TV'
+DEFAULT_NAME = 'Phillips TV'
 BASE_URL = 'https://{0}:1926/6/{1}'
 TIMEOUT = 5.0
 CONNFAILCOUNT = 5
@@ -57,28 +62,34 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_USERNAME, default=DEFAULT_USER): cv.string,
     vol.Required(CONF_PASSWORD, default=DEFAULT_PASS): cv.string,
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    vol.Optional(CONF_FAV_ONLY, default=False): cv.boolean
+    vol.Optional(CONF_FAV_ONLY, default=False): cv.boolean,
+    vol.Optional(CONF_TURN_ON_SWITCH, default=''): cv.string,
+    vol.Optional(CONF_TURN_OFF_SWITCH, default=''): cv.string,
+    vol.Optional(CONF_CAST_ENTITY, default=''): cv.string
 })
 
 # pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Set up the Philips 2016+ TV platform."""
+    """Set up the Phillips 2016+ TV platform."""
     name = config.get(CONF_NAME)
     host = config.get(CONF_HOST)
     mac = config.get(CONF_MAC)
     user = config.get(CONF_USERNAME)
     password = config.get(CONF_PASSWORD)
     favorite_only = config.get(CONF_FAV_ONLY)
-    tvapi = PhilipsTVBase(host, user, password, favorite_only)
-    add_devices([PhilipsTV(tvapi, name, mac)])
+    custom_turn_on_switch = config.get(CONF_TURN_ON_SWITCH)
+    custom_turn_off_switch = config.get(CONF_TURN_OFF_SWITCH)
+    custom_cast_entity = config.get(CONF_CAST_ENTITY)
+    tvapi = PhillipsTVBase(hass, host, user, password, favorite_only)
+    add_devices([PhillipsTV(hass, tvapi, name, mac, custom_turn_on_switch, custom_turn_off_switch, custom_cast_entity)])
 
 
-class PhilipsTV(MediaPlayerDevice):
-    """Representation of a 2016+ Philips TV exposing the JointSpace API."""
+class PhillipsTV(MediaPlayerDevice):
+    """Representation of a 2016+ Phillips TV exposing the JointSpace API."""
 
-    def __init__(self, tv, name, mac):
+    def __init__(self, hass, tv, name, mac, custom_turn_on_switch, custom_turn_off_switch, custom_cast_entity):
         """Initialize the TV."""
-        import wakeonlan
+        self._hass = hass
         self._tv = tv
         self._default_name = name
         self._name = name
@@ -98,6 +109,10 @@ class PhilipsTV(MediaPlayerDevice):
         self._source_list = []
         self._media_cont_type = ''
         self._app_name = ''
+        self._custom_turn_on_switch = custom_turn_on_switch
+        self._custom_turn_off_switch = custom_turn_off_switch
+        self._custom_cast_entity = custom_cast_entity
+
 
     @property
     def name(self):
@@ -131,33 +146,54 @@ class PhilipsTV(MediaPlayerDevice):
 
     def turn_off(self):
         """Turn off the device."""
-        self._tv.set_power_state('Standby')
+
+        # Check if entity exists on event. Can't check on init because entity could not be set up yet
+        if self._custom_turn_off_switch and not self._hass.states.get(self._custom_turn_off_switch):
+            _LOGGER.warning("Switch entity %s not registered in homeassistant, defaulting to API turn_off call", self._custom_turn_off_switch)
+            self._custom_turn_off_switch = None
+
+        if self._custom_turn_off_switch:
+            _LOGGER.info("Turning off custom switch [%s]", self._custom_turn_off_switch)
+            self.call_hass_service('switch', 'turn_off', self._custom_turn_off_switch)
+        else:
+            _LOGGER.info("Setting powerstate off")
+            self._tv.set_power_state('Standby')
         self.update()
 
     def turn_on(self):
         """Turn on the device."""
-        if not self._mac:
-            _LOGGER.error("Cannot turn on TV without mac address")
-            return None
-        i = 0
-        while not self._api_online and i < 10:
-            _LOGGER.info("Sending WOL [try #%s]", i)
-            self.wol()
-            time.sleep(3)
-            self._tv.set_power_state('On')
-            i += 1
-        if not self._api_online:
-            _LOGGER.warn("TV WakeOnLan is not working. Check mac address and make sure TV WakeOnLan is activated. If running inside docker, make sure to use host network.")
-            return None
-        i = 0
-        while not self._tv.on and i < 10:
-            _LOGGER.info("Turning on TV OS [try #%s]", i)
-            self._tv.set_power_state('On')
-            time.sleep(2)
-            self._tv.get_state()
-            i += 1
-        if not self._tv.on:
-            _LOGGER.warn("Cannot turn on the TV")
+
+        # Check if entity exists on event. Can't check on init because entity could not be set up yet
+        if self._custom_turn_on_switch and not self._hass.states.get(self._custom_turn_on_switch):
+            _LOGGER.warning("Switch entity %s not registered in homeassistant, defaulting to API turn_on call", self._custom_turn_on_switch)
+            self._custom_turn_on_switch = None
+
+        if self._custom_turn_on_switch:
+            _LOGGER.info("Turning on custom switch [%s]", self._custom_turn_on_switch)
+            self.call_hass_service('switch', 'turn_on', self._custom_turn_on_switch)
+        else:
+            i = 0
+            # TODO: This is blocking and self._tv.on will not change until 20 iterations are done
+            while not self._tv.on and i < 20:
+                if not self._api_online:
+                    _LOGGER.info("Sending WOL: %s", i)
+                    self.wol()
+                _LOGGER.info("Setting powerstate: %s", i)
+                self._tv.set_power_state('On')
+                time.sleep(2)
+                i += 1
+
+    def play_media(self, media_type, media_id, **kwargs):
+        if self._custom_cast_entity and not self._hass.states.get(self._custom_cast_entity):
+            _LOGGER.warning("Cast entity %s not registered in homeassistant, turning off ability to play media", self._custom_cast_entity)
+            self._custom_cast_entity = None
+
+        if self._custom_cast_entity:
+            self.call_hass_service('media_extractor', 'play_media', self._custom_cast_entity, {"media_content_id": media_id, "media_content_type": media_type})
+            self._state = STATE_PLAYING
+        else:
+             _LOGGER.info("Cast entity not defined, cannot play media")
+
 
     def volume_up(self):
         """Send volume up command."""
@@ -246,7 +282,14 @@ class PhilipsTV(MediaPlayerDevice):
         return self._app_name
 
     def wol(self):
-        self._wol.send_magic_packet(self._mac)
+        if self._mac:
+            self._wol.send_magic_packet(self._mac)
+
+    def call_hass_service(self, domain, service, entity, additional_vars={}):
+        vars = {"entity_id": entity}
+        vars.update(additional_vars)
+        self._hass.services.call(domain, service, vars)
+
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update(self):
@@ -266,7 +309,14 @@ class PhilipsTV(MediaPlayerDevice):
         self._on = self._tv.on
         self._api_online = self._tv.api_online
         if self._tv.on:
-            if self._state in (STATE_OFF, STATE_UNKNOWN) or self._media_cont_type != 'app':
+            if self._media_cont_type == 'cast':
+                self._state = STATE_PLAYING
+                try:
+                    if self._custom_cast_entity and self._hass.states.get(self._custom_cast_entity):
+                        self._channel_id = self._hass.states.get(self._custom_cast_entity).attributes['media_content_id']
+                except Exception as e:
+                    _LOGGER.warning(e)
+            elif self._state in (STATE_OFF, STATE_UNKNOWN) or self._media_cont_type != 'app':
                 self._state = STATE_ON
             elif self._media_cont_type == 'app':
                 self._state = STATE_IDLE
@@ -274,8 +324,9 @@ class PhilipsTV(MediaPlayerDevice):
             self._state = STATE_OFF
 
 
-class PhilipsTVBase(object):
-    def __init__(self, host, user, password, favorite_only):
+class PhillipsTVBase(object):
+    def __init__(self, hass, host, user, password, favorite_only):
+        self._hass = hass
         self._host = host
         self._user = user
         self._password = password
@@ -362,23 +413,33 @@ class PhilipsTVBase(object):
             if rr:
                 pkg_name = rr.get('component', {}).get('packageName', '')
                 class_name = rr.get('component', {}).get('className', '')
+                _LOGGER.info(f"{pkg_name} - {class_name}")
                 if pkg_name in ('org.droidtv.zapster', 'org.droidtv.playtv','NA'):
-                    self.media_content_type = 'channel'
-                    r = self._get_req('activities/tv')
-                    if r:
-                        self.channel_id = r.get('channel', {}).get('preset', 'N/A')
-                        self.channel_name = r.get('channel', {}).get('name', 'N/A')
-                        self.app_name = '📺'
+                    if class_name in ('org.droidtv.playtv.PlayTvActivity', 'NA'):
+                        self.media_content_type = 'app'
+                        self.channel_name = 'PlayTV'
+                        self.app_name = '📱'
                     else:
-                        self.channel_name = 'N/A'
-                        self.channel_id = 'N/A'
-                        self.app_name = '📺'
+                        self.media_content_type = 'channel'
+                        r = self._get_req('activities/tv')
+                        if r:
+                            self.channel_id = r.get('channel', {}).get('preset', 'N/A')
+                            self.channel_name = r.get('channel', {}).get('name', 'N/A')
+                            self.app_name = '📺'
+                        else:
+                            self.channel_name = 'N/A'
+                            self.channel_id = 'N/A'
+                            self.app_name = '📺'
                 else:
                     self.media_content_type = 'app'
-                    if pkg_name == 'com.google.android.leanbacklauncher':
-                        self.app_name = ''
+                    if pkg_name in ['com.google.android.leanbacklauncher', 'com.google.android.tvlauncher']:
+                        self.app_name = '📱'
                         self.channel_name = 'Home'
-                        self.media_content_type = ''
+                        #self.media_content_type = ''
+                    elif pkg_name == 'com.google.android.apps.mediashell':
+                        self.app_name = '📺'
+                        self.channel_name = 'Casting'
+                        self.media_content_type = 'cast'
                     elif pkg_name == 'org.droidtv.nettvbrowser':
                         self.app_name = '📱'
                         self.channel_name = 'Net TV Browser'
@@ -424,17 +485,31 @@ class PhilipsTVBase(object):
                                                 fav_channel_ccinfo['name'])
             self.channel_source_list.sort()
         else:
-            _LOGGER.warn("Favorites not supported for this TV")
+            _LOGGER.debug("Favorites not supported for this TV")
             return self.get_channels()
 
     def get_applications(self):
         r = self._get_req('applications')
         if r:
+            home_app = {'label': 'Home',
+                        'intent': {'component':
+                                    {'packageName': 'com.google.android',
+                                    'className': 'com.google.android.tvlauncher'},
+                                    'action': 'android.intent.action.MAIN'},
+                        'order': 0,
+                        'id': 'com.google.android.tvlauncher-com.google.android',
+                        'type': 'app'}
+
             self.class_name_to_app = {app['intent']['component']['className']: app
                                       for app in r['applications']}
+
+            self.class_name_to_app['com.google.android.tvlauncher'] = home_app
+
             self.applications = dict(sorted({app['label']: app
                                              for app in r['applications']}.items(),
                                              key=lambda a: a[0].upper()))
+            self.applications['Home'] = home_app
+
             self.app_source_list = ['📱 ' + appLabel
                                     for appLabel in self.applications.keys()]
 
@@ -442,7 +517,11 @@ class PhilipsTVBase(object):
         if source_label:
             if source_label.startswith('📱'):
                 app = self.applications[source_label[2:]]
-                self._post_req('activities/launch', app)
+
+                if app['label'] == 'Home':
+                    self.send_key('Home')
+                else:
+                    self._post_req('activities/launch', app)
             elif source_label.startswith('📺'):
                 chn = self.channels[source_label[2:]]
                 data = {
@@ -498,3 +577,4 @@ class PhilipsTVBase(object):
 
     def send_key(self, key):
         self._post_req('input/key', {'key': key})
+
