@@ -413,7 +413,6 @@ class PhillipsTVBase(object):
             if rr:
                 pkg_name = rr.get('component', {}).get('packageName', '')
                 class_name = rr.get('component', {}).get('className', '')
-                _LOGGER.info(f"{pkg_name} - {class_name}")
                 if pkg_name in ('org.droidtv.zapster', 'org.droidtv.playtv','NA'):
                     if class_name in ('org.droidtv.playtv.PlayTvActivity', 'NA'):
                         self.media_content_type = 'app'
