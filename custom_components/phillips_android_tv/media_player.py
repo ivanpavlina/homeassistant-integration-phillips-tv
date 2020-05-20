@@ -8,7 +8,7 @@ import wakeonlan
 
 from datetime import timedelta
 from homeassistant.components.media_player import (
-    MediaPlayerDevice, PLATFORM_SCHEMA
+    MediaPlayerEntity, PLATFORM_SCHEMA
 )
 from homeassistant.components.media_player.const import (
     SUPPORT_STOP, SUPPORT_PLAY, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE,
@@ -84,7 +84,7 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     add_devices([PhillipsTV(hass, tvapi, name, mac, custom_turn_on_switch, custom_turn_off_switch, custom_cast_entity)])
 
 
-class PhillipsTV(MediaPlayerDevice):
+class PhillipsTV(MediaPlayerEntity):
     """Representation of a 2016+ Phillips TV exposing the JointSpace API."""
 
     def __init__(self, hass, tv, name, mac, custom_turn_on_switch, custom_turn_off_switch, custom_cast_entity):
